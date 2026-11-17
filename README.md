@@ -51,7 +51,7 @@ Spreadsheets show *what is in stock*. They don't show *what to do next*. This da
 Business logic lives in `src/` and has **no Streamlit dependency**, so it is fully unit-testable. UI code in `components/` and `views/` only renders results.
 
 ```
-cartify/
+ecommerce-operations-inventory-dashboard/
 ├── app.py                      # Streamlit entry point: navigation, sidebar, page routing
 ├── requirements.txt
 ├── pytest.ini
@@ -106,7 +106,7 @@ Parsing, validation and metric computation are cached with `st.cache_data`, keye
 * `src/config.py` was added so that the schema and every business threshold live in one validated place instead of being hard-coded across modules.
 * `views/` was added so each dashboard page is its own module, keeping `app.py` to routing only.
 * `components/state.py` and `components/sidebar.py` centralise session state and caching. Pages read one immutable `PageContext`.
-* The project root is the repository root (`cartify/`) rather than a nested `ecommerce-inventory-dashboard/` folder.
+* The project root is the repository root rather than a nested sub-folder.
 
 ## Technology stack
 
@@ -116,8 +116,8 @@ Python 3.11+ (developed and tested on 3.13 only) · Streamlit · Pandas · NumPy
 
 ```bash
 # 1. Clone and enter the project
-git clone <your-repo-url> cartify
-cd cartify
+git clone https://github.com/Pavanvish10/ecommerce-operations-inventory-dashboard.git
+cd ecommerce-operations-inventory-dashboard
 
 # 2. Create and activate a virtual environment
 python -m venv .venv

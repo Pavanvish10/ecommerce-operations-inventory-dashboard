@@ -13,14 +13,24 @@ env/
 
 # Secrets / local config
 .env
+.env.*
+!.env.example
 .streamlit/secrets.toml
+*.pem
+*.key
 
 # Editors & OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+desktop.ini
+*.swp
+*~
 
-# Local exports
+# Temporary files & local exports
+*.tmp
+*.bak
+tmp/
 exports/
 *.log
