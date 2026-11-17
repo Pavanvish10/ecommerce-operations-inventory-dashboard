@@ -1,0 +1,10 @@
+SKU_ID,Product_Name,Category,Current_Stock,Units_Sold,Unit_Price,Reorder_Level,Supplier_Lead_Time,Last_Restock_Date
+DEMO-001,Desk Organizer,Office,45,60,14.99,20,7,2026-10-01
+DEMO-002,Gel Pens 10pk,Office,abc,120,6.50,40,5,2026-10-12
+DEMO-003,Stapler,Office,30,-4,9.99,10,6,2026-09-20
+,Notebook A5,Office,80,50,4.25,25,4,2026-10-30
+DEMO-004,Paper Clips,,500,90,$1.99,100,3,not a date
+DEMO-005,Monitor Riser,Office,12,15,39.00,,14,2026-08-15
+DEMO-001,Desk Organizer,Office,45,60,14.99,20,7,2026-10-01
+DEMO-005,Monitor Riser v2,Office,20,15,41.00,10,14,2026-08-15
+DEMO-006,Whiteboard,Office,0,0,55.00,5,,2027-03-01
