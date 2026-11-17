@@ -114,7 +114,7 @@ class TestRiskClassification:
             ("OOS", "Out of Stock", "Critical", ACTION_REPLENISH_URGENT),
             ("OOS-NODEMAND", "Out of Stock", "Medium", ACTION_INVESTIGATE),
             ("STOCKOUT", "Stockout Risk", "Critical", ACTION_REPLENISH_URGENT),
-            ("LOW", "Low Stock", "Medium", ACTION_REPLENISH),
+            ("LOW", "Reorder Point", "Medium", ACTION_REPLENISH),
             ("DEAD", "Dead Stock", "High", ACTION_INVESTIGATE),
             ("EXCESS-FAST", "Excess Inventory", "Medium", ACTION_REDUCE),
             ("EXCESS-SLOW", "Excess Inventory", "Medium", ACTION_PRICING),

@@ -33,6 +33,16 @@ OPTIONAL_COLUMNS: dict[str, tuple[str, str]] = {
         "Number of days Units_Sold covers. If absent, the configurable assumed "
         "sales window is used.",
     ),
+    "Unit_Cost": (
+        "non_negative_number",
+        "Purchase cost per unit. Enables margin analysis and values inventory, "
+        "excess stock and reorders at cost instead of selling price.",
+    ),
+    "Lead_Time_Std_Days": (
+        "non_negative_number",
+        "Standard deviation of supplier lead time in days. Used by the "
+        "statistical safety-stock method.",
+    ),
 }
 
 #: Columns of the optional daily sales-history file used for demand trends.
@@ -104,6 +114,11 @@ class AnalyticsConfig:
     """Days of inventory at or below which stockout is considered imminent."""
     approaching_threshold_buffer: float = 0.20
     """Stock within (1 + buffer) x reorder threshold counts as 'approaching'."""
+    safety_stock_method: str = "days"
+    """``days`` (safety_stock_days of average demand) or ``statistical``
+    (z × √(L·σd² + d²·σL²), requires an uploaded daily sales history)."""
+    service_level: float = 0.95
+    """Target cycle service level for the statistical safety-stock method."""
     threshold_mode: str = "max"
     """How the effective reorder threshold is chosen: ``dataset`` (Reorder_Level
     column only), ``dynamic`` (demand-based reorder point only) or ``max`` (the
@@ -125,6 +140,12 @@ class AnalyticsConfig:
     """Weekly % change in fitted demand beyond which a trend is Growing/Declining."""
     min_history_days: int = 14
     """Minimum calendar days of history required before a trend is reported."""
+
+    # Demand forecasting (history only)
+    forecast_window_days: int = 28
+    """Days of most recent history each forecasting method is fitted on."""
+    forecast_holdout_days: int = 14
+    """Days held out at the end of the history to backtest forecast accuracy."""
 
     # Data handling
     duplicate_strategy: str = "first"
@@ -155,6 +176,12 @@ class AnalyticsConfig:
             raise ValueError("overstock_cover_days must exceed target_cover_days.")
         if self.threshold_mode not in {"dataset", "dynamic", "max"}:
             raise ValueError("threshold_mode must be 'dataset', 'dynamic' or 'max'.")
+        if self.safety_stock_method not in {"days", "statistical"}:
+            raise ValueError("safety_stock_method must be 'days' or 'statistical'.")
+        if not 0.5 <= self.service_level < 1:
+            raise ValueError("service_level must be in [0.5, 1).")
+        if self.forecast_window_days < 7 or self.forecast_holdout_days < 7:
+            raise ValueError("Forecast window and holdout must be at least 7 days.")
         if self.duplicate_strategy not in {"first", "last"}:
             raise ValueError("duplicate_strategy must be 'first' or 'last'.")
         self.health_weights.normalised()  # validates weights

@@ -3,12 +3,13 @@
 :func:`build_inventory_metrics` runs every engine in dependency order:
 
     validated data
-      → sales velocity & revenue   (sales_analytics)
-      → ABC classification         (sales_analytics)
-      → reorder plan & alerts      (reorder_engine)
-      → health score               (health_score)
-      → risk classification        (risk_analysis)
-      → demand trends (optional)   (sales_analytics, if history supplied)
+      → sales velocity, revenue, margin       (sales_analytics)
+      → ABC classification                    (sales_analytics)
+      → demand trends & variability           (sales_analytics, if history supplied)
+      → reorder plan & alerts                 (reorder_engine; uses demand variability
+                                               for statistical safety stock)
+      → health score                          (health_score)
+      → risk classification                   (risk_analysis)
 """
 
 from __future__ import annotations
@@ -47,6 +48,14 @@ def build_inventory_metrics(
     """
     metrics = compute_sales_velocity(data, config)
     metrics["ABC_Class"] = classify_abc(metrics["Revenue"])
+
+    if history is not None and not history.empty:
+        trends = compute_demand_trends(history, config)
+        metrics = metrics.merge(trends, on="SKU_ID", how="left")  # preserves row order
+        metrics["Demand_Trend"] = metrics["Demand_Trend"].fillna(NO_HISTORY)
+    else:
+        metrics["Demand_Trend"] = NO_HISTORY
+
     metrics = compute_reorder_plan(metrics, config)
     metrics = compute_health_scores(metrics, config)
     metrics = classify_risk(metrics, config)
@@ -54,13 +63,6 @@ def build_inventory_metrics(
     if "Last_Restock_Date" in metrics.columns:
         reference = pd.Timestamp(config.reference_date)
         metrics["Days_Since_Restock"] = (reference - metrics["Last_Restock_Date"]).dt.days
-
-    if history is not None and not history.empty:
-        trends = compute_demand_trends(history, config)
-        metrics = metrics.merge(trends, on="SKU_ID", how="left")
-        metrics["Demand_Trend"] = metrics["Demand_Trend"].fillna(NO_HISTORY)
-    else:
-        metrics["Demand_Trend"] = NO_HISTORY
     return metrics
 
 
@@ -80,6 +82,10 @@ class KPISummary:
     slow_moving_products: int
     avg_health_score: float
     insufficient_data_products: int
+    total_gross_profit: float = float("nan")
+    """Σ Units_Sold × (price − cost); NaN when no cost data is available."""
+    gross_margin_pct: float = float("nan")
+    """Gross profit ÷ revenue over products with known cost."""
 
     def as_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -93,6 +99,12 @@ def compute_kpis(metrics: pd.DataFrame) -> KPISummary:
     """Calculate dashboard KPIs. Missing values are excluded from sums/means."""
     if metrics.empty:
         return KPISummary(0, 0.0, 0.0, 0.0, 0.0, float("nan"), 0, 0, 0, 0, float("nan"), 0)
+    gross_profit = margin = float("nan")
+    if "Gross_Profit" in metrics.columns and metrics["Gross_Profit"].notna().any():
+        with_cost = metrics["Gross_Profit"].notna()
+        gross_profit = float(metrics.loc[with_cost, "Gross_Profit"].sum())
+        costed_revenue = float(metrics.loc[with_cost, "Revenue"].sum())
+        margin = gross_profit / costed_revenue if costed_revenue > 0 else float("nan")
     return KPISummary(
         total_products=int(len(metrics)),
         total_inventory_units=float(np.nansum(metrics["Current_Stock"])),
@@ -106,4 +118,6 @@ def compute_kpis(metrics: pd.DataFrame) -> KPISummary:
         slow_moving_products=int(metrics["Is_Slow_Moving"].sum()),
         avg_health_score=_nan_safe(metrics["Health_Score"].mean()),
         insufficient_data_products=int((metrics["Health_Class"] == "Insufficient Data").sum()),
+        total_gross_profit=gross_profit,
+        gross_margin_pct=margin,
     )

@@ -5,7 +5,8 @@ stock, ``d`` average daily sales, ``DOI = S / d`` days of inventory, ``RL`` the
 dataset reorder level, ``L`` the supplier lead time.
 
 1. **Stock availability** (default weight 35 %) – depth of stock relative to
-   the safety buffer ``SS = d × safety_stock_days``::
+   the safety buffer ``SS`` (``d × safety_stock_days`` by default, or the
+   statistical safety stock when that method is selected)::
 
        A = 0                 if S = 0
          = 1                 if S > 0 and SS = 0   (no measurable demand)
@@ -26,11 +27,11 @@ dataset reorder level, ``L`` the supplier lead time.
          = 1 if S > 0 else 0            if RL = 0
 
 4. **Lead-time coverage** (15 %) – can stock last until an order placed today
-   arrives, plus the safety buffer::
+   arrives, plus the safety buffer (``SSd = SS / d``, the safety stock in days)::
 
-       LT = 0                                       if S = 0
-          = 1                                       if d = 0
-          = min(1, DOI / (L + safety_stock_days))   otherwise
+       LT = 0                          if S = 0
+          = 1                          if d = 0
+          = min(1, DOI / (L + SSd))    otherwise
 
 Final score::
 
@@ -50,6 +51,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import INSUFFICIENT_DATA, AnalyticsConfig
+from src.utils import join_nonempty
 
 COMPONENT_COLUMNS: dict[str, str] = {
     "stock_availability": "Score_Stock_Availability",
@@ -67,10 +69,15 @@ HEALTH_BANDS: tuple[tuple[float, str], ...] = (
 
 
 def stock_availability_score(
-    stock: pd.Series, daily: pd.Series, safety_days: float
+    stock: pd.Series, daily: pd.Series, safety_days: float, safety: pd.Series | None = None
 ) -> pd.Series:
-    """Component A – stock relative to the safety-stock buffer."""
-    safety = daily * safety_days
+    """Component A – stock relative to the safety-stock buffer.
+
+    ``safety`` (units) overrides the default ``daily × safety_days`` buffer.
+    """
+    if safety is None:
+        safety = daily * safety_days
+    safety = safety.astype("float64")
     ratio = (stock / safety.where(safety > 0)).clip(upper=1.0)
     score = ratio.mask(safety == 0, 1.0).mask(stock == 0, 0.0)
     return score.mask(stock.isna() | daily.isna())
@@ -111,9 +118,12 @@ def lead_time_coverage_score(
     daily: pd.Series,
     doi: pd.Series,
     lead_time: pd.Series,
-    safety_days: float,
+    safety_days: float | pd.Series,
 ) -> pd.Series:
-    """Component LT – days of inventory against lead time plus safety buffer."""
+    """Component LT – days of inventory against lead time plus safety buffer.
+
+    ``safety_days`` may be a scalar or a per-product Series (safety stock in days).
+    """
     horizon = lead_time + safety_days
     score = (doi / horizon.where(horizon > 0)).clip(upper=1.0)
     score = score.mask(horizon == 0, (stock > 0).astype("float64"))
@@ -141,8 +151,15 @@ def compute_health_scores(metrics: pd.DataFrame, config: AnalyticsConfig) -> pd.
     daily = out["Avg_Daily_Sales"].astype("float64")
     doi = out["Days_Of_Inventory"].astype("float64")
 
+    safety = out["Safety_Stock"] if "Safety_Stock" in out.columns else None
+    if safety is not None:
+        safety_cover_days = (safety / daily.where(daily > 0)).fillna(config.safety_stock_days)
+    else:
+        safety_cover_days = config.safety_stock_days
     components = {
-        "stock_availability": stock_availability_score(stock, daily, config.safety_stock_days),
+        "stock_availability": stock_availability_score(
+            stock, daily, config.safety_stock_days, safety
+        ),
         "inventory_coverage": inventory_coverage_score(
             doi, config.target_cover_days, config.overstock_cover_days
         ),
@@ -154,7 +171,7 @@ def compute_health_scores(metrics: pd.DataFrame, config: AnalyticsConfig) -> pd.
             daily,
             doi,
             out["Supplier_Lead_Time"].astype("float64"),
-            config.safety_stock_days,
+            safety_cover_days,
         ),
     }
     weights = config.health_weights.normalised()
@@ -182,9 +199,7 @@ def compute_health_scores(metrics: pd.DataFrame, config: AnalyticsConfig) -> pd.
         partial_parts.append(
             pd.Series(np.where(core_known & components[name].isna(), label, ""), index=out.index)
         )
-    missing_inputs = pd.concat(partial_parts, axis=1).apply(
-        lambda row: ", ".join(p for p in row if p), axis=1
-    )
+    missing_inputs = join_nonempty(partial_parts, ", ")
     note = note.mask(
         missing_inputs != "",
         "Partial score (re-weighted): " + missing_inputs + " missing",

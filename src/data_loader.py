@@ -17,7 +17,7 @@ import pandas as pd
 CsvSource = Union[str, Path, bytes, BinaryIO]
 
 #: Uploads larger than this are rejected to protect the app's memory.
-MAX_FILE_BYTES = 200 * 1024 * 1024
+MAX_FILE_BYTES = 100 * 1024 * 1024  # ~1 GB peak RAM at this size; see README "Performance"
 _ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
 
 

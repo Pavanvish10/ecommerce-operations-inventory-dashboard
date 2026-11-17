@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import ABC_CLASSES, AnalyticsConfig
+from src.utils import clean_float
 
 DAYS_PER_WEEK = 7
 DAYS_PER_MONTH = 30
@@ -50,7 +51,7 @@ def days_of_inventory(stock: pd.Series, daily_sales: pd.Series) -> pd.Series:
     """
     stock = stock.astype("float64")
     daily_sales = daily_sales.astype("float64")
-    result = safe_divide(stock, daily_sales)
+    result = clean_float(safe_divide(stock, daily_sales))  # 29.999999999999996 → 30.0
     result = result.mask((daily_sales == 0) & (stock > 0), np.inf)
     result = result.mask(stock == 0, 0.0)
     return result.mask(stock.isna() | daily_sales.isna())
@@ -61,7 +62,14 @@ def compute_sales_velocity(frame: pd.DataFrame, config: AnalyticsConfig) -> pd.D
 
     Added columns: ``Sales_Window_Days``, ``Velocity_Basis``, ``Avg_Daily_Sales``,
     ``Avg_Weekly_Sales``, ``Avg_Monthly_Sales``, ``Revenue``, ``Inventory_Value``,
-    ``Days_Of_Inventory``.
+    ``Days_Of_Inventory``, ``Unit_Value``, ``Valuation_Basis`` and — when a
+    ``Unit_Cost`` column is supplied — ``Inventory_Cost_Value``, ``Gross_Profit``
+    and ``Gross_Margin_Pct``.
+
+    ``Inventory_Value`` is always at selling price (retail value). ``Unit_Value``
+    is the per-unit value used for working-capital measures (excess stock,
+    reorder value): purchase cost where known, otherwise selling price, with
+    the basis recorded in ``Valuation_Basis``.
     """
     out = frame.copy()
     assumed = float(config.sales_window_days)
@@ -82,6 +90,18 @@ def compute_sales_velocity(frame: pd.DataFrame, config: AnalyticsConfig) -> pd.D
     out["Revenue"] = out["Units_Sold"] * out["Unit_Price"]
     out["Inventory_Value"] = out["Current_Stock"] * out["Unit_Price"]
     out["Days_Of_Inventory"] = days_of_inventory(out["Current_Stock"], daily)
+
+    if "Unit_Cost" in out.columns:
+        cost = out["Unit_Cost"].astype("float64")
+        price = out["Unit_Price"].astype("float64")
+        out["Inventory_Cost_Value"] = out["Current_Stock"] * cost
+        out["Gross_Profit"] = out["Units_Sold"] * (price - cost)
+        out["Gross_Margin_Pct"] = (price - cost) / price.where(price > 0)
+        out["Unit_Value"] = cost.fillna(price)
+        out["Valuation_Basis"] = np.where(cost.notna(), "Cost", "Price (cost missing)")
+    else:
+        out["Unit_Value"] = out["Unit_Price"]
+        out["Valuation_Basis"] = "Price (no cost data)"
     return out
 
 
@@ -114,7 +134,11 @@ def classify_abc(revenue: pd.Series) -> pd.Series:
 
 
 def category_performance(metrics: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate sales and inventory KPIs per category."""
+    """Aggregate sales and inventory KPIs per category.
+
+    ``Avg_Daily_Sales`` here is the *sum* of product daily rates (the category's
+    total daily demand). ``Gross_Profit`` is added when cost data is present.
+    """
     if metrics.empty:
         return pd.DataFrame(
             columns=[
@@ -134,6 +158,11 @@ def category_performance(metrics: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
+    if "Gross_Profit" in metrics.columns:
+        grouped = grouped.merge(
+            metrics.groupby("Category", dropna=False)["Gross_Profit"].sum(min_count=1).reset_index(),
+            on="Category",
+        )
     total_revenue = grouped["Revenue"].sum()
     grouped["Revenue_Share"] = (
         grouped["Revenue"] / total_revenue if total_revenue > 0 else 0.0
@@ -199,7 +228,7 @@ def compute_demand_trends(history: pd.DataFrame, config: AnalyticsConfig) -> pd.
     (Growing / Stable / Declining / Insufficient History).
     """
     columns = [
-        "SKU_ID", "History_Days", "History_Units", "History_Avg_Daily",
+        "SKU_ID", "History_Days", "History_Units", "History_Avg_Daily", "Demand_Std_Daily",
         "Trend_Pct_Per_Week", "Demand_Trend",
     ]
     matrix = history_matrix(history)
@@ -215,6 +244,7 @@ def compute_demand_trends(history: pd.DataFrame, config: AnalyticsConfig) -> pd.
             "History_Days": n_days,
             "History_Units": values.sum(axis=1),
             "History_Avg_Daily": mean_daily,
+            "Demand_Std_Daily": values.std(axis=1, ddof=1) if n_days > 1 else np.nan,
         }
     )
 

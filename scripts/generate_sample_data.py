@@ -6,7 +6,8 @@ create the demo data — never in any operational calculation.
 
 Outputs
 -------
-* ``data/sample_inventory.csv``          – 160 SKUs across 8 categories
+* ``data/sample_inventory.csv``          – 160 SKUs across 8 categories,
+  including optional ``Unit_Cost`` and ``Lead_Time_Std_Days`` columns
 * ``data/sample_sales_history.csv``      – 90 days of daily unit sales per SKU
 * ``data/sample_inventory_with_errors.csv`` – small file with deliberate data
   quality problems to demonstrate validation
@@ -28,6 +29,9 @@ import numpy as np
 import pandas as pd
 
 SEED = 20261115
+#: Separate stream for the optional cost / lead-time-variability columns, so
+#: adding them did not change any previously generated value.
+EXTRA_SEED = 20261116
 END_DATE = date(2026, 11, 15)
 HISTORY_DAYS = 90
 WINDOW_DAYS = 30
@@ -174,6 +178,14 @@ def generate(rng: np.random.Generator) -> tuple[pd.DataFrame, pd.DataFrame]:
     return pd.DataFrame(inventory_rows), history.reset_index(drop=True)
 
 
+def add_optional_columns(inventory: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    """Purchase cost (35–75 % of price) and lead-time standard deviation (10–35 %)."""
+    out = inventory.copy()
+    out["Unit_Cost"] = (out["Unit_Price"] * rng.uniform(0.35, 0.75, len(out))).round(2)
+    out["Lead_Time_Std_Days"] = (out["Supplier_Lead_Time"] * rng.uniform(0.10, 0.35, len(out))).round(1)
+    return out
+
+
 def error_sample() -> pd.DataFrame:
     """A small file containing deliberate data-quality problems."""
     return pd.DataFrame(
@@ -198,6 +210,7 @@ def error_sample() -> pd.DataFrame:
 def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     inventory, history = generate(np.random.default_rng(SEED))
+    inventory = add_optional_columns(inventory, np.random.default_rng(EXTRA_SEED))
     inventory.to_csv(DATA_DIR / "sample_inventory.csv", index=False)
     history.to_csv(DATA_DIR / "sample_sales_history.csv", index=False)
     error_sample().to_csv(DATA_DIR / "sample_inventory_with_errors.csv", index=False)

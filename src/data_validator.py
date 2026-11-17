@@ -43,6 +43,15 @@ REJECTION_REASON = "Rejection_Reason"
 UNCATEGORIZED = "Uncategorized"
 
 _CURRENCY_PATTERN = re.compile(r"^\s*[$€£¥₹]\s*")
+#: A comma is only accepted as a thousands separator in this exact shape
+#: ("1,234" / "12,345.67"). Anything else ("12,50", "1,2,3") is ambiguous —
+#: possibly a decimal comma — and is reported instead of being guessed.
+_THOUSANDS_PATTERN = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_DAY_MONTH_PATTERN = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-]\d{2,4}")
+#: Values above this magnitude are treated as data-entry errors (they would
+#: overflow currency totals and date arithmetic).
+MAX_NUMERIC_VALUE = 1e12
 _MAX_ROWS_IN_MESSAGE = 10
 
 
@@ -145,7 +154,8 @@ def normalise_columns(
 
 
 def _strip_text(series: pd.Series) -> pd.Series:
-    stripped = series.astype("string").str.strip()
+    # pyarrow-backed strings: regex / strip run vectorised in C (~20x faster on large files)
+    stripped = series.astype("string[pyarrow]").str.strip()
     return stripped.mask(stripped == "", pd.NA)
 
 
@@ -170,40 +180,63 @@ def _coerce_numeric(
     issues: list[ValidationIssue],
 ) -> pd.Series:
     raw = _strip_text(frame[column])
-    cleaned = raw.str.replace(_CURRENCY_PATTERN, "", regex=True).str.replace(",", "", regex=False)
-    numeric = pd.to_numeric(cleaned, errors="coerce").astype("float64")
+    # Fast path: plain numbers (the vast majority) convert in one vectorised call.
+    numeric = pd.to_numeric(raw, errors="coerce").astype("float64")
+    ambiguous_comma = pd.Series(False, index=raw.index)
+    needs_cleaning = raw.notna() & numeric.isna()
+    if needs_cleaning.any():
+        # Slow path only for values that failed: currency symbols, thousands separators.
+        cleaned = raw[needs_cleaning].str.replace(_CURRENCY_PATTERN.pattern, "", regex=True)
+        has_comma = cleaned.str.contains(",", regex=False).fillna(False).astype(bool)
+        valid = cleaned.str.fullmatch(_THOUSANDS_PATTERN.pattern).fillna(False).astype(bool)
+        ambiguous = has_comma & ~valid
+        ambiguous_comma.loc[needs_cleaning] = ambiguous.to_numpy()
+        cleaned = cleaned.str.replace(",", "", regex=False).mask(ambiguous, pd.NA)
+        numeric.loc[needs_cleaning] = pd.to_numeric(cleaned, errors="coerce").astype("float64").to_numpy()
     numeric = numeric.where(np.isfinite(numeric))  # treat inf as invalid
 
     missing = raw.isna()
     unparseable = ~missing & numeric.isna()
+    too_large = numeric.notna() & (numeric.abs() > MAX_NUMERIC_VALUE)
     if kind == "positive_number":
-        out_of_range = numeric.notna() & (numeric <= 0)
+        below_range = numeric.notna() & (numeric <= 0)
         range_text = "must be greater than zero"
     else:
-        out_of_range = numeric.notna() & (numeric < 0)
+        below_range = numeric.notna() & (numeric < 0)
         range_text = "cannot be negative"
+    out_of_range = below_range | too_large
 
     if unparseable.any():
+        hint = (
+            " Commas are only accepted as thousands separators (e.g. 1,234.50); "
+            "use a dot for decimals."
+            if (unparseable & ambiguous_comma).any()
+            else ""
+        )
         issues.append(
             ValidationIssue(
                 "warning",
                 f"{int(unparseable.sum())} non-numeric value(s) in {column} were "
-                "treated as missing.",
+                "treated as missing." + hint,
                 column,
                 _source_rows(frame, unparseable),
             )
         )
         notes = _append_note(notes, unparseable, f"{column} invalid ('" + raw.fillna("") + "')")
-    if out_of_range.any():
-        issues.append(
-            ValidationIssue(
-                "warning",
-                f"{int(out_of_range.sum())} value(s) in {column} {range_text} and were "
-                "treated as missing.",
-                column,
-                _source_rows(frame, out_of_range),
+    for mask, text in (
+        (below_range, range_text),
+        (too_large, f"exceed the plausible maximum of {MAX_NUMERIC_VALUE:,.0f}"),
+    ):
+        if mask.any():
+            issues.append(
+                ValidationIssue(
+                    "warning",
+                    f"{int(mask.sum())} value(s) in {column} {text} and were treated as missing.",
+                    column,
+                    _source_rows(frame, mask),
+                )
             )
-        )
+    if out_of_range.any():
         notes = _append_note(
             notes, out_of_range, f"{column} out of range (" + raw.fillna("") + ")"
         )
@@ -232,8 +265,28 @@ def _coerce_date(
     allow_future: bool = False,
 ) -> pd.Series:
     raw = _strip_text(frame[column])
-    parsed = pd.to_datetime(raw, errors="coerce", format="mixed")
+    # utc=True makes mixed / timezone-aware inputs safe (they are converted to
+    # UTC and the timezone dropped); naive dates are unaffected.
+    parsed = pd.to_datetime(raw, errors="coerce", format="mixed", utc=True).dt.tz_localize(None)
     unparseable = raw.notna() & parsed.isna()
+    non_iso = parsed.notna() & ~raw.str.match(_ISO_DATE_PATTERN).fillna(False).astype(bool)
+    ambiguous = pd.Series(False, index=raw.index)
+    if non_iso.any():  # extraction only for the non-ISO subset
+        parts = raw[non_iso].str.extract(_DAY_MONTH_PATTERN).astype("float64")
+        ambiguous.loc[non_iso] = (
+            (parts[0] <= 12) & (parts[1] <= 12) & (parts[0] != parts[1])
+        ).to_numpy()
+    if ambiguous.any():
+        issues.append(
+            ValidationIssue(
+                "info",
+                f"{int(ambiguous.sum())} date(s) in {column} are ambiguous between day/month "
+                "and month/day order and were read as month/day (e.g. 03/04/2026 = 4 March). "
+                "Use YYYY-MM-DD to avoid ambiguity.",
+                column,
+                _source_rows(frame, ambiguous),
+            )
+        )
     if unparseable.any():
         issues.append(
             ValidationIssue(
@@ -436,6 +489,20 @@ def validate_inventory(
         frame = frame.loc[~exact_dup].reset_index(drop=True)
         raw_copy = raw_copy.loc[~exact_dup].reset_index(drop=True)
         notes = notes.loc[~exact_dup].reset_index(drop=True)
+
+    case_key = frame["SKU_ID"].str.casefold()
+    case_variants = case_key.duplicated(keep=False) & ~frame["SKU_ID"].duplicated(keep=False)
+    if case_variants.any():
+        issues.append(
+            ValidationIssue(
+                "warning",
+                f"{int(case_variants.sum())} row(s) have SKU_IDs that differ only by letter "
+                "case (e.g. 'abc-1' vs 'ABC-1'). They are kept as separate products — check "
+                "whether they are the same item.",
+                "SKU_ID",
+                _source_rows(frame, case_variants),
+            )
+        )
 
     conflict = frame.duplicated(subset=["SKU_ID"], keep=duplicate_strategy)
     if conflict.any():

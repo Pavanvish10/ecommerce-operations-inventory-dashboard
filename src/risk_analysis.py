@@ -8,7 +8,7 @@ Category           Rule                                                   Risk l
 Insufficient Data  stock or sales velocity unknown                        Unknown
 Out of Stock       ``S = 0``                                              Critical (Medium if no demand)
 Stockout Risk      reorder alert is Critical or High                      Critical / High
-Low Stock          at or below the effective reorder threshold            Medium
+Reorder Point      at or below the effective reorder threshold            Medium
 Dead Stock         ``Units_Sold = 0`` and ``S > 0``                        High
 Excess Inventory   ``DOI > overstock_cover_days``                         Medium
 Slow-Moving        ``d < slow_moving_velocity``                           Low
@@ -16,8 +16,9 @@ Healthy            none of the above                                      Low
 =================  =====================================================  ==========
 
 Tied-up working capital is measured as the value of stock beyond the overstock
-horizon: ``Excess_Units = max(0, S − d × overstock_cover_days)``, valued at
-``Unit_Price``.
+horizon: ``Excess_Units = floor(max(0, S − d × overstock_cover_days))``, valued at
+``Unit_Value`` (purchase cost when a ``Unit_Cost`` column is supplied,
+otherwise selling price — see ``Valuation_Basis``).
 """
 
 from __future__ import annotations
@@ -26,11 +27,12 @@ import numpy as np
 import pandas as pd
 
 from src.config import INSUFFICIENT_DATA, RISK_LEVELS, AnalyticsConfig
+from src.utils import safe_floor
 
 RISK_CATEGORIES: tuple[str, ...] = (
     "Out of Stock",
     "Stockout Risk",
-    "Low Stock",
+    "Reorder Point",
     "Dead Stock",
     "Excess Inventory",
     "Slow-Moving",
@@ -76,7 +78,7 @@ def classify_risk(plan: pd.DataFrame, config: AnalyticsConfig) -> pd.DataFrame:
     daily = out["Avg_Daily_Sales"].astype("float64")
     doi = out["Days_Of_Inventory"].astype("float64")
     sold = out["Units_Sold"].astype("float64")
-    price = out["Unit_Price"].astype("float64")
+    unit_value = (out["Unit_Value"] if "Unit_Value" in out.columns else out["Unit_Price"]).astype("float64")
     alert = out["Alert_Level"]
     overstock = config.overstock_cover_days
 
@@ -85,8 +87,8 @@ def classify_risk(plan: pd.DataFrame, config: AnalyticsConfig) -> pd.DataFrame:
     out["Is_Slow_Moving"] = known & (daily < config.slow_moving_velocity)
     out["Is_Excess"] = known & (doi > overstock)
     excess_units = (stock - daily * overstock).clip(lower=0).where(known)
-    out["Excess_Units"] = np.floor(excess_units)
-    out["Excess_Inventory_Value"] = out["Excess_Units"] * price
+    out["Excess_Units"] = safe_floor(excess_units)
+    out["Excess_Inventory_Value"] = out["Excess_Units"] * unit_value
 
     out_of_stock = known & (stock == 0)
     stockout_risk = known & alert.isin(["Critical", "High"]) & ~out_of_stock
@@ -98,7 +100,7 @@ def classify_risk(plan: pd.DataFrame, config: AnalyticsConfig) -> pd.DataFrame:
 
     out["Risk_Category"] = np.select(
         [~known, out_of_stock, stockout_risk, low_stock, dead, excess, slow],
-        [INSUFFICIENT_DATA, "Out of Stock", "Stockout Risk", "Low Stock", "Dead Stock",
+        [INSUFFICIENT_DATA, "Out of Stock", "Stockout Risk", "Reorder Point", "Dead Stock",
          "Excess Inventory", "Slow-Moving"],
         default="Healthy",
     )
@@ -117,7 +119,6 @@ def classify_risk(plan: pd.DataFrame, config: AnalyticsConfig) -> pd.DataFrame:
     )
     out["Risk_Priority"] = out["Risk_Level"].map(RISK_PRIORITY).astype(int)
 
-    qty = _fmt(out["Reorder_Quantity"], 0)
     action = np.select(
         [
             ~known,
@@ -135,47 +136,75 @@ def classify_risk(plan: pd.DataFrame, config: AnalyticsConfig) -> pd.DataFrame:
     )
     out["Recommended_Action"] = action
 
-    window = _fmt(out["Sales_Window_Days"], 0)
-    rationale = pd.Series("", index=out.index, dtype=object)
-    if "Data_Quality_Notes" in out.columns:
-        missing_text = "Stock or sales data missing (" + out["Data_Quality_Notes"].fillna("") + ")"
-    else:
-        missing_text = pd.Series("Stock or sales data missing", index=out.index)
-    rationale = rationale.mask(~known, missing_text)
-    rationale = rationale.mask(
-        out_of_stock & (daily > 0),
-        "0 units on hand while selling " + _fmt(daily, 2) + "/day; order " + qty + " units",
+    out["Action_Rationale"] = _build_rationale(
+        out, known, out_of_stock, stockout_risk, low_stock, dead, excess, slow, config
     )
-    rationale = rationale.mask(
-        out_of_stock & (daily == 0),
-        "Out of stock with no sales in the last " + window + " days – confirm demand before reordering",
-    )
-    rationale = rationale.mask(
-        stockout_risk | low_stock,
-        _fmt(doi) + " days of cover vs " + _fmt(out["Supplier_Lead_Time"]) + "-day lead time; order "
-        + qty + " units",
-    )
-    rationale = rationale.mask(
-        dead,
-        "No sales in the last " + window + " days; " + _fmt(out["Inventory_Value"], 2)
-        + " of inventory value tied up",
-    )
-    rationale = rationale.mask(
-        excess,
-        _fmt(doi, 0) + " days of cover (> " + f"{overstock:g}" + "); "
-        + _fmt(out["Excess_Inventory_Value"], 2) + " in excess stock",
-    )
-    rationale = rationale.mask(
-        slow,
-        "Sells " + _fmt(daily, 2) + "/day (below " + f"{config.slow_moving_velocity:g}" + "/day)",
-    )
-    rationale = rationale.mask(
-        rationale == "",
-        _fmt(doi, 0).where(np.isfinite(doi), "∞") + " days of cover; health score "
-        + _fmt(out["Health_Score"]),
-    )
-    out["Action_Rationale"] = rationale
     return out
+
+
+def _build_rationale(
+    out: pd.DataFrame,
+    known: pd.Series,
+    out_of_stock: pd.Series,
+    stockout_risk: pd.Series,
+    low_stock: pd.Series,
+    dead: pd.Series,
+    excess: pd.Series,
+    slow: pd.Series,
+    config: AnalyticsConfig,
+) -> pd.Series:
+    """Explain each classification with the product's own numbers.
+
+    Each branch formats numbers only for the rows it applies to; formatting
+    every column for every row was the main cost of the risk engine.
+    """
+    daily = out["Avg_Daily_Sales"].astype("float64")
+    rationale = pd.Series("", index=out.index, dtype=object)
+
+    def assign(mask: pd.Series, build) -> None:
+        if mask.any():
+            rationale.loc[mask] = build(out.loc[mask])
+
+    if "Data_Quality_Notes" in out.columns:
+        assign(~known, lambda f: "Stock or sales data missing (" + f["Data_Quality_Notes"].fillna("") + ")")
+    else:
+        assign(~known, lambda f: pd.Series("Stock or sales data missing", index=f.index))
+    assign(
+        out_of_stock & (daily > 0),
+        lambda f: "0 units on hand while selling " + _fmt(f["Avg_Daily_Sales"], 2) + "/day; order "
+        + _fmt(f["Reorder_Quantity"], 0) + " units",
+    )
+    assign(
+        out_of_stock & (daily == 0),
+        lambda f: "Out of stock with no sales in the last " + _fmt(f["Sales_Window_Days"], 0)
+        + " days – confirm demand before reordering",
+    )
+    assign(
+        stockout_risk | low_stock,
+        lambda f: _fmt(f["Days_Of_Inventory"]) + " days of cover vs " + _fmt(f["Supplier_Lead_Time"])
+        + "-day lead time; order " + _fmt(f["Reorder_Quantity"], 0) + " units",
+    )
+    assign(
+        dead,
+        lambda f: "No sales in the last " + _fmt(f["Sales_Window_Days"], 0) + " days; "
+        + _fmt(f["Inventory_Value"], 2) + " of inventory value tied up",
+    )
+    assign(
+        excess,
+        lambda f: _fmt(f["Days_Of_Inventory"], 0) + f" days of cover (> {config.overstock_cover_days:g}); "
+        + _fmt(f["Excess_Inventory_Value"], 2) + " in excess stock",
+    )
+    assign(
+        slow,
+        lambda f: "Sells " + _fmt(f["Avg_Daily_Sales"], 2)
+        + f"/day (below {config.slow_moving_velocity:g}/day)",
+    )
+    assign(
+        rationale == "",
+        lambda f: _fmt(f["Days_Of_Inventory"], 0).where(np.isfinite(f["Days_Of_Inventory"]), "∞")
+        + " days of cover; health score " + _fmt(f["Health_Score"]),
+    )
+    return rationale
 
 
 def risk_summary(metrics: pd.DataFrame) -> pd.DataFrame:

@@ -11,7 +11,8 @@ Notation (per product)
 
 Formulas
 --------
-* Safety stock         ``SS  = d × SSd``
+* Safety stock         ``SS  = d × SSd``  (default "days of cover" method), or
+  ``SS = z × √(L·σd² + d²·σL²)`` (statistical method, see :func:`safety_stock`)
 * Reorder point        ``ROP = d × L + SS``
 * Effective threshold  ``T`` = ``RL`` (dataset mode), ``ROP`` (dynamic mode)
   or ``max(RL, ROP)`` (max mode; a missing input falls back to the other)
@@ -36,11 +37,18 @@ below its threshold ``T``.
 from __future__ import annotations
 
 from datetime import timedelta
+from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
 
 from src.config import ALERT_LEVELS, INSUFFICIENT_DATA, AnalyticsConfig
+from src.utils import join_nonempty, safe_ceil, safe_floor
+
+#: Stockout dates further out than this are not projected: constant-demand
+#: extrapolation is meaningless at that range and would overflow date types.
+MAX_STOCKOUT_HORIZON_DAYS = 3650
+METHOD_DAYS = "Days of cover"
 
 ALERT_PRIORITY: dict[str, int] = {
     **{level: rank for rank, level in enumerate(ALERT_LEVELS)},
@@ -48,10 +56,43 @@ ALERT_PRIORITY: dict[str, int] = {
 }
 
 
-def _join_notes(*parts: pd.Series) -> pd.Series:
-    """Join several string Series with '; ', skipping empty entries."""
-    frame = pd.concat(parts, axis=1).fillna("")
-    return frame.apply(lambda row: "; ".join(p for p in row if p), axis=1)
+def safety_stock(metrics: pd.DataFrame, config: AnalyticsConfig) -> tuple[pd.Series, pd.Series]:
+    """Safety stock per product and the method used for it.
+
+    * **Days of cover** (default): ``SS = d × safety_stock_days``.
+    * **Statistical** (``config.safety_stock_method == "statistical"``)::
+
+          SS = z × √(L·σd² + d²·σL²)
+
+      ``z`` is the standard-normal quantile of ``config.service_level``,
+      ``σd`` the standard deviation of daily demand from the uploaded sales
+      history (``Demand_Std_Daily``), ``σL`` the optional
+      ``Lead_Time_Std_Days`` column (0 if absent). This is the standard
+      formula for independent demand and lead-time variability. Products
+      without enough history, or without a lead time, fall back to the
+      days-of-cover method and are labelled accordingly.
+    """
+    daily = metrics["Avg_Daily_Sales"].astype("float64")
+    days_based = daily * config.safety_stock_days
+    method = pd.Series(METHOD_DAYS, index=metrics.index, dtype=object)
+    if config.safety_stock_method != "statistical":
+        return days_based, method
+
+    lead = metrics["Supplier_Lead_Time"].astype("float64")
+    sigma_d = metrics.get("Demand_Std_Daily", pd.Series(np.nan, index=metrics.index)).astype("float64")
+    history_days = metrics.get("History_Days", pd.Series(np.nan, index=metrics.index)).astype("float64")
+    sigma_l = metrics.get("Lead_Time_Std_Days", pd.Series(0.0, index=metrics.index))
+    sigma_l = sigma_l.astype("float64").fillna(0.0)
+    z = NormalDist().inv_cdf(config.service_level)
+    statistical = z * np.sqrt(lead * sigma_d**2 + daily**2 * sigma_l**2)
+    eligible = (
+        statistical.notna()
+        & daily.notna()
+        & (history_days >= config.min_history_days)
+    )
+    method = method.mask(eligible, f"Statistical ({config.service_level:.1%} service level)")
+    method = method.mask(~eligible, f"{METHOD_DAYS} (fallback: no usable history or lead time)")
+    return statistical.where(eligible, days_based), method
 
 
 def effective_threshold(
@@ -89,7 +130,7 @@ def compute_reorder_plan(metrics: pd.DataFrame, config: AnalyticsConfig) -> pd.D
     doi = out["Days_Of_Inventory"].astype("float64")
     review = config.review_period_days
 
-    safety = daily * config.safety_stock_days
+    safety, safety_method = safety_stock(out, config)
     lead_demand = daily * lead
     reorder_point = lead_demand + safety
     threshold = effective_threshold(reorder_level, reorder_point, config.threshold_mode)
@@ -117,6 +158,7 @@ def compute_reorder_plan(metrics: pd.DataFrame, config: AnalyticsConfig) -> pd.D
         default="Healthy",
     )
     out["Safety_Stock"] = safety
+    out["Safety_Stock_Method"] = safety_method
     out["Lead_Time_Demand"] = lead_demand
     out["Reorder_Point"] = reorder_point
     out["Effective_Reorder_Threshold"] = threshold
@@ -126,14 +168,16 @@ def compute_reorder_plan(metrics: pd.DataFrame, config: AnalyticsConfig) -> pd.D
 
     needs = known & (critical | high | at_threshold)
     shortfall = (target - stock).clip(lower=0)
-    quantity = np.ceil(shortfall).where(needs, 0.0)
+    quantity = safe_ceil(shortfall).where(needs, 0.0)
     out["Needs_Reorder"] = needs
     out["Reorder_Quantity"] = quantity.where(~(needs & target.isna()))  # NaN = cannot compute
-    out["Reorder_Value"] = out["Reorder_Quantity"] * out["Unit_Price"]
+    unit_value = out["Unit_Value"] if "Unit_Value" in out.columns else out["Unit_Price"]
+    out["Reorder_Value"] = out["Reorder_Quantity"] * unit_value
 
     reference = pd.Timestamp(config.reference_date)
-    finite_doi = doi.where(has_demand & np.isfinite(doi))
-    out["Estimated_Stockout_Date"] = reference + pd.to_timedelta(np.floor(finite_doi), unit="D")
+    projectable = has_demand & np.isfinite(doi) & (doi <= MAX_STOCKOUT_HORIZON_DAYS)
+    finite_doi = safe_floor(doi).where(projectable)
+    out["Estimated_Stockout_Date"] = reference + pd.to_timedelta(finite_doi, unit="D")
 
     # Human-readable explanation of each alert
     fmt_doi = doi.round(1).astype(str)
@@ -182,7 +226,15 @@ def compute_reorder_plan(metrics: pd.DataFrame, config: AnalyticsConfig) -> pd.D
         ),
         index=out.index,
     )
-    out["Reorder_Note"] = _join_notes(note_lead, note_no_demand, note_qty, note_basis)
+    note_horizon = pd.Series(
+        np.where(
+            has_demand & np.isfinite(doi) & (doi > MAX_STOCKOUT_HORIZON_DAYS),
+            f"Stockout beyond {MAX_STOCKOUT_HORIZON_DAYS // 365} years – date not projected",
+            "",
+        ),
+        index=out.index,
+    )
+    out["Reorder_Note"] = join_nonempty([note_lead, note_no_demand, note_qty, note_basis, note_horizon])
     return out
 
 
