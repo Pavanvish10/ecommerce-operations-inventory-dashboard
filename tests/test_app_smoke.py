@@ -87,9 +87,26 @@ def test_settings_change_recalculates_metrics():
     assert int(after.replace(",", "")) > int(before.replace(",", ""))
 
 
+def test_statistical_safety_stock_setting_applies_end_to_end():
+    at = run_page("reorder")
+    at.session_state["config"] = at.session_state["config"].with_updates(safety_stock_method="statistical")
+    at.run()
+    assert not at.exception
+    ctx = at.session_state["_page_context"]
+    assert ctx.metrics["Safety_Stock_Method"].str.startswith("Statistical").all()
+
+
+def test_sales_page_shows_backtested_forecast():
+    at = run_page("sales")
+    assert not at.exception
+    assert any(s.value == "Demand forecast (backtested)" for s in at.subheader)
+    assert any("lowest WAPE" in c.value for c in at.caption)
+
+
 def test_settings_form_rejects_invalid_values():
     at = run_page("settings")
-    at.number_input[5].set_value(10.0)  # overstock threshold below target coverage (30)
-    at.button[0].click().run()  # form submit button
+    overstock = next(n for n in at.number_input if n.label == "Overstock threshold (days)")
+    overstock.set_value(10.0)  # below target coverage (30) → invalid combination
+    next(b for b in at.button if b.label == "Apply settings").click().run()
     assert not at.exception
     assert any("Settings not applied" in e.value for e in at.error)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from statistics import NormalDist
+
 import streamlit as st
 
 from components import charts
@@ -15,7 +17,8 @@ from views.common import context_bar, plot, require_data
 
 REORDER_COLUMNS = [
     "Alert_Level", "SKU_ID", "Product_Name", "Category", "Current_Stock", "Avg_Daily_Sales",
-    "Days_Of_Inventory", "Supplier_Lead_Time", "Effective_Reorder_Threshold", "Target_Stock",
+    "Days_Of_Inventory", "Supplier_Lead_Time", "Safety_Stock", "Safety_Stock_Method",
+    "Effective_Reorder_Threshold", "Target_Stock",
     "Reorder_Quantity", "Reorder_Value", "Estimated_Stockout_Date", "Alert_Reason", "Reorder_Note",
 ]
 WATCH_COLUMNS = [
@@ -26,13 +29,19 @@ WATCH_COLUMNS = [
 
 def _methodology(config) -> None:
     with st.expander("How reorder alerts and quantities are calculated", icon="🧮"):
+        ss_text = (
+            f"z × √(L·σd² + d²·σL²),  z = {NormalDist().inv_cdf(config.service_level):.3f} "
+            f"({config.service_level:.1%} service level)   [fallback: d × {config.safety_stock_days:g} days]"
+            if config.safety_stock_method == "statistical"
+            else f"d × {config.safety_stock_days:g} days"
+        )
         mode_text = {
             "dataset": "the dataset Reorder_Level",
             "dynamic": "the demand-based reorder point (ROP)",
             "max": "the higher of Reorder_Level and the demand-based reorder point",
         }[config.threshold_mode]
         st.markdown(
-            f"""<div class="formula">Safety stock        SS  = d × {config.safety_stock_days:g} days
+            f"""<div class="formula">Safety stock        SS  = {ss_text}
 Reorder point       ROP = d × L + SS
 Reorder threshold   T   = {mode_text}
 Target stock        TS  = max(d × (L + {config.review_period_days:g}) + SS,  T + d × {config.review_period_days:g})
@@ -72,7 +81,8 @@ def render() -> None:
     cols[3].metric("Units to reorder", format_number(plan["Reorder_Quantity"].sum()),
                    help="Sum of recommended reorder quantities.")
     cols[4].metric("Reorder value", format_currency(plan["Reorder_Value"].sum()),
-                   help="Reorder quantity × unit price (selling price; purchase cost is not in the dataset).")
+                   help="Reorder quantity × unit cost where Unit_Cost is supplied, otherwise × selling "
+                        "price (see the Valuation_Basis column in the export).")
     st.caption(f"Stockout dates are estimated from the as-of date **{ctx.config.reference_date:%d %b %Y}**.")
 
     _methodology(ctx.config)

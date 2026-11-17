@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -80,12 +81,17 @@ def _filter_controls(metrics: pd.DataFrame) -> tuple[FilterCriteria, str]:
     return local, state["ex_sort"]
 
 
-def _product_detail(row: pd.Series, config) -> None:
-    st.markdown(
-        f"### {row['Product_Name']}  \n`{row['SKU_ID']}` · {row['Category']} &nbsp; "
-        f"{status_badge(row['Health_Class'])} {status_badge(row['Alert_Level'])}",
-        unsafe_allow_html=True,
+def product_heading_html(row: pd.Series) -> str:
+    """Drill-down heading. Uploaded text is HTML-escaped, so it cannot inject markup (XSS)."""
+    name, sku, category = (escape(str(row[c])) for c in ("Product_Name", "SKU_ID", "Category"))
+    return (
+        f"<h3>{name}</h3><p><code>{sku}</code> · {category} &nbsp; "
+        f"{status_badge(row['Health_Class'])} {status_badge(row['Alert_Level'])}</p>"
     )
+
+
+def _product_detail(row: pd.Series, config) -> None:
+    st.markdown(product_heading_html(row), unsafe_allow_html=True)
     cols = st.columns(6)
     cols[0].metric("Stock", format_number(row["Current_Stock"]))
     cols[1].metric("Daily sales", format_number(row["Avg_Daily_Sales"], 2))
@@ -119,6 +125,14 @@ def _product_detail(row: pd.Series, config) -> None:
             f"- **Velocity basis:** {row['Velocity_Basis']}\n"
             f"- **Demand trend:** {row['Demand_Trend']}"
         )
+        if pd.notna(row.get("Gross_Margin_Pct", float("nan"))):
+            st.markdown(
+                f"- **Gross margin:** {row['Gross_Margin_Pct']:.1%} "
+                f"(gross profit {format_currency(row['Gross_Profit'])} over the sales window)"
+            )
+        if "Safety_Stock_Method" in row:
+            st.markdown(f"- **Safety stock:** {format_number(row['Safety_Stock'], 1)} units "
+                        f"({row['Safety_Stock_Method']})")
         if row.get("Reorder_Note"):
             st.caption(row["Reorder_Note"])
         if row.get("Data_Quality_Notes"):
@@ -159,7 +173,10 @@ def render() -> None:
     if results.empty:
         st.info("No products match these filters.")
         return
-    selected = render_table(results, EXPLORER_COLUMNS, key="ex_table",
+    # Selection is positional; keying the table on the exact result set resets it whenever
+    # filters or sorting change, so a stale index can never show the wrong product.
+    result_key = int(pd.util.hash_pandas_object(results["SKU_ID"], index=False).sum() % 10**12)
+    selected = render_table(results, EXPLORER_COLUMNS, key=f"ex_table_{result_key}",
                             height=min(440, 38 + 35 * (len(results) + 1)), selectable=True)
     st.divider()
     if selected is not None and selected < len(results):

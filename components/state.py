@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from components.alerts import md_escape
 from src.config import AnalyticsConfig
 from src.data_loader import DataLoadError, load_csv
 from src.data_validator import (
@@ -23,6 +24,7 @@ from src.data_validator import (
     validate_sales_history,
 )
 from src.filters import FilterCriteria, apply_filters
+from src.forecasting import backtest_forecasts, forecast_demand
 from src.inventory_engine import build_inventory_metrics
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,7 +65,7 @@ def _load_error_result(message: str) -> ValidationResult:
     )
 
 
-@st.cache_data(show_spinner="Validating dataset…", max_entries=8)
+@st.cache_data(show_spinner="Validating dataset…", max_entries=4, ttl=3600)
 def validate_inventory_bytes(raw: bytes, duplicate_strategy: str, reference: date) -> ValidationResult:
     """Parse and validate inventory CSV bytes (cached)."""
     try:
@@ -73,7 +75,7 @@ def validate_inventory_bytes(raw: bytes, duplicate_strategy: str, reference: dat
     return validate_inventory(frame, duplicate_strategy, reference)
 
 
-@st.cache_data(show_spinner="Validating sales history…", max_entries=8)
+@st.cache_data(show_spinner="Validating sales history…", max_entries=2, ttl=3600)
 def validate_history_bytes(
     raw: bytes, known_skus: tuple[str, ...], reference: date
 ) -> ValidationResult:
@@ -85,12 +87,22 @@ def validate_history_bytes(
     return validate_sales_history(frame, known_skus, reference)
 
 
-@st.cache_data(show_spinner="Computing inventory analytics…", max_entries=16)
+@st.cache_data(show_spinner="Computing inventory analytics…", max_entries=6, ttl=3600)
 def compute_metrics(
     data: pd.DataFrame, config_dict: dict, history: pd.DataFrame | None
 ) -> pd.DataFrame:
     """Run the full analytics pipeline (cached on data + configuration)."""
     return build_inventory_metrics(data, AnalyticsConfig.from_dict(config_dict), history)
+
+
+@st.cache_data(show_spinner="Backtesting demand forecasts…", max_entries=4, ttl=3600)
+def compute_forecasts(history: pd.DataFrame, config_dict: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Backtest every method, then forecast 30 days ahead with the best one (cached)."""
+    config = AnalyticsConfig.from_dict(config_dict)
+    evaluation = backtest_forecasts(history, config)
+    if evaluation.empty:
+        return evaluation, pd.DataFrame(columns=["SKU_ID", "Forecast_Daily", "Forecast_Total"])
+    return evaluation, forecast_demand(history, config, evaluation["Method"].iloc[0], horizon=30)
 
 
 def init_session() -> None:
@@ -116,7 +128,7 @@ def set_inventory(raw: bytes, name: str) -> None:
     """Make an uploaded (already validated) inventory file the active dataset."""
     state = st.session_state
     state.inventory_bytes = raw
-    state.inventory_name = name
+    state.inventory_name = md_escape(name)  # rendered as Markdown in several places
     if state.get("is_sample"):
         # Sample history SKUs would not match a user's catalogue.
         state.history_bytes = None
@@ -127,7 +139,7 @@ def set_inventory(raw: bytes, name: str) -> None:
 def set_history(raw: bytes | None, name: str | None) -> None:
     """Set or clear the daily sales-history dataset."""
     st.session_state.history_bytes = raw
-    st.session_state.history_name = name
+    st.session_state.history_name = md_escape(name) if name else None
 
 
 def build_context(criteria_factory) -> PageContext:

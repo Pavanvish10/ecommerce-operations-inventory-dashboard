@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+from html import escape
+
 import pandas as pd
 import streamlit as st
 
 from components.theme import STATUS_ICONS
 from src.data_validator import ValidationResult
 from src.export_manager import to_csv_bytes
+
+
+_MARKDOWN_SPECIALS = set(r"\`*_[]<>#|~$")
+
+
+def md_escape(text: str) -> str:
+    """Escape Markdown/LaTeX syntax in untrusted text (file names, CSV headers).
+
+    Streamlit already strips scripts from Markdown, but unescaped user text
+    could still render links, images or formatting.
+    """
+    return "".join("\\" + ch if ch in _MARKDOWN_SPECIALS else ch for ch in str(text))
 
 
 def page_header(title: str, subtitle: str) -> None:
@@ -55,8 +69,8 @@ def render_alert_summary(metrics: pd.DataFrame) -> None:
 
 
 def status_badge(label: str) -> str:
-    """Inline HTML badge with icon + text (colour is never the only cue)."""
-    return f'<span class="badge">{STATUS_ICONS.get(label, "")} {label}</span>'
+    """Inline HTML badge with icon + text (colour is never the only cue). Escaped."""
+    return f'<span class="badge">{STATUS_ICONS.get(label, "")} {escape(str(label))}</span>'
 
 
 def render_validation_report(result: ValidationResult, title: str, key: str) -> None:
@@ -69,7 +83,7 @@ def render_validation_report(result: ValidationResult, title: str, key: str) -> 
     cols[3].metric("Warnings", f"{summary['warnings']:,}")
 
     for issue in result.errors:
-        st.error(issue.message, icon="⛔")
+        st.error(md_escape(issue.message), icon="⛔")
     if result.warnings or result.infos:
         with st.expander(
             f"{title}: {len(result.warnings)} warning(s), {len(result.infos)} note(s)",
@@ -79,7 +93,7 @@ def render_validation_report(result: ValidationResult, title: str, key: str) -> 
                 rows = issue.rows_preview()
                 suffix = f" — CSV line(s): {rows}" if rows else ""
                 icon = "⚠️" if issue.severity == "warning" else "ℹ️"
-                st.markdown(f"{icon} {issue.message}{suffix}")
+                st.markdown(f"{icon} {md_escape(issue.message)}{suffix}")
     elif not result.errors:
         st.success("No data quality issues found.", icon="✅")
 

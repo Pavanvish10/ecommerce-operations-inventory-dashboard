@@ -53,7 +53,7 @@ RISK_LEVEL_COLORS = {
 RISK_CATEGORY_COLORS = {
     "Out of Stock": STATUS_CRITICAL,
     "Stockout Risk": STATUS_SERIOUS,
-    "Low Stock": STATUS_WARNING,
+    "Reorder Point": STATUS_WARNING,
     "Dead Stock": STATUS_SERIOUS,
     "Excess Inventory": STATUS_WARNING,
     "Slow-Moving": STATUS_WARNING,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from components.alerts import page_header, render_validation_report
+from components.alerts import md_escape, page_header, render_validation_report
 from components.state import (
     get_context,
     load_sample_data,
@@ -54,7 +54,7 @@ def _upload_inventory(ctx) -> None:
         return
     raw = uploaded.getvalue()
     result = validate_inventory_bytes(raw, ctx.config.duplicate_strategy, ctx.config.reference_date)
-    st.markdown(f"**Validation of `{uploaded.name}`**")
+    st.markdown(f"**Validation of {md_escape(uploaded.name)}**")
     render_validation_report(result, "Validation details", key="upload_inventory")
     if result.is_valid:
         st.markdown("**Preview** (first 20 cleaned rows)")
@@ -63,7 +63,7 @@ def _upload_inventory(ctx) -> None:
         is_active = raw == st.session_state.get("inventory_bytes")
         if is_active:
             st.success("This file is the active dataset.", icon="✅")
-        elif st.button(f"Use `{uploaded.name}` for analysis", type="primary", key="apply_inventory"):
+        elif st.button(f"Use {md_escape(uploaded.name)} for analysis", type="primary", key="apply_inventory"):
             set_inventory(raw, uploaded.name)
             st.rerun()
     else:
@@ -90,7 +90,8 @@ def _upload_history(ctx) -> None:
         if result.is_valid:
             if raw == st.session_state.get("history_bytes"):
                 st.success("This history file is active.", icon="✅")
-            elif st.button(f"Use `{uploaded.name}` as sales history", type="primary", key="apply_history"):
+            elif st.button(f"Use {md_escape(uploaded.name)} as sales history", type="primary",
+                           key="apply_history"):
                 set_history(raw, uploaded.name)
                 st.rerun()
     if st.session_state.get("history_bytes"):

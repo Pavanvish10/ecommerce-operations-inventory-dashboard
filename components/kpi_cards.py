@@ -59,10 +59,16 @@ def render_kpi_grid(kpis: KPISummary, config: AnalyticsConfig) -> None:
             f"Valued at {format_currency(kpis.total_inventory_value)} (stock × unit price)",
         )
     with row1[2]:
+        margin_caption = (
+            f"Gross margin {kpis.gross_margin_pct:.1%} (products with cost data)"
+            if not math.isnan(kpis.gross_margin_pct)
+            else "Over the sales window"
+        )
         _card(
             "Total Revenue", format_currency(kpis.total_revenue),
-            "Σ Units_Sold × Unit_Price over the sales window.",
-            "Over the sales window",
+            "Σ Units_Sold × Unit_Price over the sales window. Gross margin = Σ U×(price − cost) "
+            "÷ revenue, over products that have a Unit_Cost.",
+            margin_caption,
         )
     with row1[3]:
         _card(

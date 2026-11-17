@@ -45,6 +45,21 @@ def render() -> None:
         critical = c3.number_input("Critical cover (days)", 0.0, 60.0, float(config.critical_cover_days), 0.5,
                                    help="Days of stock at or below which stockout is imminent.")
         c1, c2 = st.columns(2)
+        ss_method = c1.radio(
+            "Safety stock method", ["days", "statistical"],
+            index=["days", "statistical"].index(config.safety_stock_method),
+            format_func=lambda v: {
+                "days": "Days of cover (d × safety days)",
+                "statistical": "Statistical z·√(L·σd² + d²·σL²) — needs sales history",
+            }[v],
+            help="Statistical uses demand variability from the daily sales history and the optional "
+                 "Lead_Time_Std_Days column. Products without enough history fall back to days of cover.",
+        )
+        service_pct = c2.slider(
+            "Service level (statistical method)", 50.0, 99.9, float(config.service_level * 100), 0.5,
+            format="%.1f%%", help="Probability of not stocking out during a replenishment cycle.",
+        )
+        c1, c2 = st.columns(2)
         buffer_pct = c1.slider("'Approaching threshold' buffer (%)", 0, 100,
                                int(round(config.approaching_threshold_buffer * 100)), 5)
         mode = c2.selectbox("Reorder threshold", list(THRESHOLD_MODES), format_func=THRESHOLD_MODES.get,
@@ -66,6 +81,11 @@ def render() -> None:
         slow = c1.number_input("Slow-moving below (units/day)", 0.0, 1000.0, float(config.slow_moving_velocity), 0.1)
         trend = c2.number_input("Trend threshold (% per week)", 0.0, 100.0, float(config.trend_threshold_pct), 0.5)
         min_hist = c3.number_input("Minimum history (days)", 2, 365, int(config.min_history_days))
+        c1, c2 = st.columns(2)
+        fc_window = c1.number_input("Forecast fitting window (days)", 7, 365, int(config.forecast_window_days),
+                                    help="Most recent days of history each forecasting method uses.")
+        fc_holdout = c2.number_input("Forecast backtest holdout (days)", 7, 120, int(config.forecast_holdout_days),
+                                     help="Days held out at the end of the history to measure accuracy.")
 
         st.subheader("Data handling")
         dup = st.radio(
@@ -84,12 +104,16 @@ def render() -> None:
                 critical_cover_days=float(critical),
                 approaching_threshold_buffer=buffer_pct / 100,
                 threshold_mode=mode,
+                safety_stock_method=ss_method,
+                service_level=float(service_pct) / 100,
                 target_cover_days=float(target),
                 overstock_cover_days=float(overstock),
                 health_weights=HealthWeights(w_avail / 100, w_cover / 100, w_reorder / 100, w_lead / 100),
                 slow_moving_velocity=float(slow),
                 trend_threshold_pct=float(trend),
                 min_history_days=int(min_hist),
+                forecast_window_days=int(fc_window),
+                forecast_holdout_days=int(fc_holdout),
                 duplicate_strategy=dup,
                 as_of_date=None if use_today else as_of,
             )

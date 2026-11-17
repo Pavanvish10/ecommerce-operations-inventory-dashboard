@@ -73,7 +73,7 @@ def render() -> None:
             "| Category | Rule | Default action |\n|---|---|---|\n"
             "| Out of Stock | stock = 0 | Replenish (urgent) — or investigate demand if nothing sold |\n"
             "| Stockout Risk | Critical/High reorder alert | Replenish |\n"
-            "| Low Stock | at/below the reorder threshold | Replenish |\n"
+            "| Reorder Point | at/below the effective reorder threshold, not yet a stockout risk | Replenish |\n"
             "| Dead Stock | no sales in the window, stock > 0 | Investigate demand |\n"
             f"| Excess Inventory | > {ctx.config.overstock_cover_days:g} days of cover | Reduce purchasing (review pricing if also slow-moving) |\n"
             f"| Slow-Moving | < {ctx.config.slow_moving_velocity:g} units/day | Monitor inventory |\n"

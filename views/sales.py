@@ -8,7 +8,7 @@ import streamlit as st
 from components import charts
 from components.alerts import page_header
 from components.kpi_cards import format_currency, format_number
-from components.state import get_context
+from components.state import compute_forecasts, get_context
 from components.tables import render_table
 from src.sales_analytics import (
     INSUFFICIENT_HISTORY,
@@ -93,6 +93,68 @@ def _render_trends(ctx, data: pd.DataFrame) -> None:
             )
 
 
+def _render_forecast(ctx, data: pd.DataFrame) -> None:
+    st.subheader("Demand forecast (backtested)")
+    if not ctx.has_history:
+        st.caption("Requires a daily sales history (Data Sources page).")
+        return
+    config = ctx.config
+    evaluation, forecast = compute_forecasts(ctx.history.data, config.to_dict())
+    if evaluation.empty:
+        st.info(
+            f"A backtest needs at least {config.forecast_window_days + config.forecast_holdout_days} days "
+            "of history with sales in the holdout period; forecasts are not shown without an "
+            "accuracy measurement.",
+            icon="ℹ️",
+        )
+        return
+    best = evaluation.iloc[0]
+    st.caption(
+        f"Each method was fitted on history up to {best['Holdout_Start'] - pd.Timedelta(days=1):%d %b %Y} "
+        f"and scored on the following {int(best['Holdout_Days'])} days "
+        f"({best['Holdout_Start']:%d %b} – {best['Holdout_End']:%d %b %Y}) across all "
+        f"{int(best['SKUs']):,} SKUs in the history. **{best['Method']}** had the lowest WAPE and is "
+        "used for the 30-day forecast below. Forecasts are informational — reorder quantities use "
+        "the aggregate sales rate."
+        + (" ⚠️ The sample history is synthetic, so these accuracy figures only describe the "
+           "generator, not real demand." if ctx.is_sample else "")
+    )
+    left, right = st.columns([2, 3])
+    with left:
+        st.dataframe(
+            evaluation[["Method", "WAPE", "Bias", "MAE"]], hide_index=True, width="stretch",
+            column_config={
+                "WAPE": st.column_config.NumberColumn("WAPE", format="percent",
+                                                      help="Σ|actual − forecast| ÷ Σ actual (lower is better)"),
+                "Bias": st.column_config.NumberColumn("Bias", format="percent",
+                                                      help="Positive = over-forecast"),
+                "MAE": st.column_config.NumberColumn("MAE (units/day)", format="%.2f"),
+            },
+        )
+    with right:
+        merged = data.merge(forecast, on="SKU_ID", how="inner")
+        if merged.empty:
+            st.caption("No forecast for the filtered products (not present in the history).")
+            return
+        merged["Forecast_vs_Velocity"] = (
+            merged["Forecast_Daily"] / merged["Avg_Daily_Sales"].where(merged["Avg_Daily_Sales"] > 0) - 1
+        )
+        view = merged.reindex(
+            merged["Forecast_vs_Velocity"].abs().sort_values(ascending=False).index
+        )[["SKU_ID", "Product_Name", "Avg_Daily_Sales", "Forecast_Daily", "Forecast_vs_Velocity"]]
+        st.dataframe(
+            view.head(200), hide_index=True, width="stretch", height=280,
+            column_config={
+                "SKU_ID": st.column_config.TextColumn("SKU"),
+                "Product_Name": st.column_config.TextColumn("Product"),
+                "Avg_Daily_Sales": st.column_config.NumberColumn("Current rate/day", format="%.2f"),
+                "Forecast_Daily": st.column_config.NumberColumn("Forecast/day (next 30d)", format="%.2f"),
+                "Forecast_vs_Velocity": st.column_config.NumberColumn("Δ vs current", format="percent"),
+            },
+        )
+        st.caption("Sorted by the largest gap between forecast and current rate (top 200).")
+
+
 def render() -> None:
     page_header(
         "Sales Analytics",
@@ -157,6 +219,7 @@ def render() -> None:
         plot(charts.pareto_curve(data), "sales_pareto")
 
     _render_trends(ctx, data)
+    _render_forecast(ctx, data)
 
     st.subheader("Product velocity")
     render_table(
